@@ -1,0 +1,7 @@
+{
+    "scripts": {
+      "dev": "nodemon worker.js",
+      "start": "node worker.js"
+    }
+  }
+  
