@@ -1,0 +1,23 @@
+# OS
+.DS_Store
+
+# env
+.env
+**/.env
+.env.*
+
+# dependencies
+node_modules/
+
+# build
+dist/
+build/
+.vite/
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# IDE
+.vscode/
