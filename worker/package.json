@@ -1,7 +1,17 @@
 {
+    "name": "worker",
+    "version": "1.0.0",
+    "type": "module",
     "scripts": {
-      "dev": "nodemon worker.js",
-      "start": "node worker.js"
+        "dev": "nodemon worker.js",
+        "start": "node worker.js"
+    },
+    "devDependencies": {
+        "nodemon": "^3.1.11"
+    },
+    "dependencies": {
+        "dotenv": "^17.2.3",
+        "pg": "^8.17.1",
+        "redis": "^5.10.0"
     }
-  }
-  
+}
