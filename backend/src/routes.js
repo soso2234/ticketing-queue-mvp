@@ -86,7 +86,7 @@ router.post("/queue/enter", async (req, res) => {
     const metaKey = `queue:token:${queueToken}`;  // 토큰 메타
     const stateKey = `queue:state:${queueToken}`; // 상태
 
-    // TTL(유효시간): 시연용으로 1시간
+    // 시연용으로 1시간
     const TTL_SEC = 60 * 60;
 
     // 토큰 메타 저장 (유저/공연/진입시각)
@@ -99,10 +99,13 @@ router.post("/queue/enter", async (req, res) => {
     // 상태 저장
     await redis.set(stateKey, "WAITING", { EX: TTL_SEC });
 
-    // 대기열에 등록 (ZSET: score=시간, 오래된 사람이 앞)
+    // 대기열에 등록
     await redis.zAdd(queueKey, [{ score: now, value: queueToken }]);
 
-    // 내 순번 계산 (0-base rank → 1-base position)
+    // 이벤트 발행용 세트에 eventId 추가
+    await redis.sAdd("queue:events", eventId);
+
+    // 내 순번 계산
     const rank = await redis.zRank(queueKey, queueToken);
     const position = rank === null ? null : rank + 1;
 
@@ -184,12 +187,12 @@ router.get("/queue/status", async (req, res) => {
     const ttlSec = await redis.ttl(metaKey); // -1, -2 일 수 있음
     const expiresInSec = ttlSec > 0 ? ttlSec : 0;
 
-    // 현재 순번 계산 (ZSET에서 rank)
+    // 현재 순번 계산
     const queueKey = `queue:${eventId}`;
     const rank = await redis.zRank(queueKey, token);
     const position = rank === null ? null : rank + 1;
 
-    // (시연용) 예상 대기시간 계산:
+    // 예상 대기시간 계산:
     // "3초마다 5명 입장" 가정 => 초당 5/3명 처리
     // 내 앞 사람 수 = position-1
     const BATCH_SIZE = Number(process.env.QUEUE_BATCH_SIZE || 5);
@@ -202,7 +205,7 @@ router.get("/queue/status", async (req, res) => {
       estimatedWaitSec = Math.ceil(ahead / perSec);
     }
 
-    // ADMITTED 상태면 admissionToken/admissionUrl도 내려주기 (worker에서 세팅할 예정)
+    // ADMITTED 상태면 admissionToken/admissionUrl도 내려주기
     // worker가 아래 키를 만들어주면 됨:
     // queue:admission:{queueToken} = admissionToken (TTL 120 등)
     let admissionToken = null;
@@ -279,7 +282,7 @@ router.post("/reservation/start", async (req, res) => {
     if (!admissionToken)
       return res.status(400).json({ error: "admissionToken is required" });
 
-    // 1) admissionToken 검증 (없으면 만료/위조/미발급)
+    // admissionToken 검증 (없으면 만료/위조/미발급)
     const admissionKey = `admission:${admissionToken}`;
     const payloadJson = await redis.get(admissionKey);
     if (!payloadJson) {
@@ -289,7 +292,7 @@ router.post("/reservation/start", async (req, res) => {
     const payload = JSON.parse(payloadJson);
     const { queueToken, userId, eventId } = payload;
 
-    // 2) reservationId 발급 + 예약 세션 저장 (TTL 120초)
+    // reservationId 발급 + 예약 세션 저장 (TTL 120초)
     const reservationId = "r_" + crypto.randomBytes(10).toString("hex");
     const reservationKey = `reservation:${reservationId}`;
 
@@ -306,8 +309,6 @@ router.post("/reservation/start", async (req, res) => {
       { EX: RESERVATION_TTL_SEC }
     );
 
-    // 3) (선택) admissionToken을 1회용으로 만들고 싶으면 삭제
-    // 시연 목적이면 권장(재사용 방지)
     await redis.del(admissionKey);
 
     return res.json({
