@@ -193,10 +193,10 @@ router.get("/queue/status", async (req, res) => {
     const position = rank === null ? null : rank + 1;
 
     // 예상 대기시간 계산:
-    // "3초마다 5명 입장" 가정 => 초당 5/3명 처리
+    // "10초마다 5명 입장" 가정 => 초당 5/10명 처리
     // 내 앞 사람 수 = position-1
     const BATCH_SIZE = Number(process.env.QUEUE_BATCH_SIZE || 5);
-    const BATCH_INTERVAL_SEC = Number(process.env.QUEUE_BATCH_INTERVAL_SEC || 3);
+    const BATCH_INTERVAL_SEC = Number(process.env.QUEUE_BATCH_INTERVAL_SEC || 10);
     const perSec = BATCH_SIZE / BATCH_INTERVAL_SEC;
 
     let estimatedWaitSec = null;
