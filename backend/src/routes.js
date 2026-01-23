@@ -493,7 +493,7 @@ router.get("/auth/kakao/callback", async (req, res) => {
     }
 
     // ===============================
-    // ✅ 여기부터 "팝업 종료 + 부모창 알림"
+    // 여기부터 "팝업 종료 + 부모창 알림"
     // ===============================
     const frontendOrigin = process.env.FRONTEND_ORIGIN || "http://localhost:4000";
 
@@ -540,14 +540,9 @@ router.get("/auth/kakao/callback", async (req, res) => {
   }
 });
 
-
-/* 
-  ************************
-  ************************
-  자체 회원가입 
-  ************************
-  ************************
-*/
+// ===============================
+// 여기부터 자체 회원가입 
+// ===============================
 
 // 회원가입 api
 router.post("/auth/signup", async (req, res) => {
@@ -626,36 +621,5 @@ router.post("/auth/login", async (req, res) => {
     return res.status(500).json({ error: "internal_error" });
   }
 });
-
-/*
-  ************************
-  ************************
-  카카오 로그아웃
-  ************************
-  ************************
-*/
-
-// 카카오 로그아웃 시작: 카카오 로그아웃 페이지로 리다이렉트
-router.get("/auth/kakao/logout", (req, res) => {
-  const clientId = process.env.KAKAO_REST_API_KEY;
-  const logoutRedirectUri = process.env.KAKAO_LOGOUT_REDIRECT_URI;
-
-  if (!clientId) return res.status(500).send("missing KAKAO_REST_API_KEY");
-  if (!logoutRedirectUri) return res.status(500).send("missing KAKAO_LOGOUT_REDIRECT_URI");
-
-  const url =
-    "https://kauth.kakao.com/oauth/logout" +
-    `?client_id=${encodeURIComponent(clientId)}` +
-    `&logout_redirect_uri=${encodeURIComponent(logoutRedirectUri)}`;
-
-  return res.redirect(url);
-});
-
-// 카카오 로그아웃 완료 후 돌아오는 콜백: 프론트 홈으로 보내기
-router.get("/auth/kakao/logout/callback", (req, res) => {
-  const frontendBase = process.env.FRONTEND_ORIGIN || "http://localhost:4000";
-  return res.redirect(`${frontendBase}/`);
-});
-
 
 export default router;
