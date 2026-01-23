@@ -1,10 +1,11 @@
 import express from "express";
 import crypto from "crypto";
 import { redis } from "./redisClient.js"; 
+import bcrypt from "bcrypt";
 import { pool } from "./db.js";
+
+
 const RESERVATION_TTL_SEC = Number(process.env.RESERVATION_TTL_SEC || 120);
-
-
 const router = express.Router();
 
 /**
@@ -324,19 +325,337 @@ router.post("/reservation/start", async (req, res) => {
 });
 
 // GET /queue
-router.get("/queue", async (req, res) => {
+// router.get("/queue", async (req, res) => {
+//   try {
+//     const result = await pool.query(
+//       `SELECT id, user_id, status, created_at
+//        FROM queue_entries
+//        ORDER BY id DESC
+//        LIMIT 50`
+//     );
+//     return res.json({ items: result.rows });
+//   } catch (err) {
+//     console.error("GET /queue failed:", err);
+//     return res.status(500).json({ error: "internal_error" });
+//   }
+// });
+
+
+/**
+ * @swagger
+ * /auth/kakao:
+ *   get:
+ *     summary: 카카오 로그인 시작 (Redirect)
+ *     description: |
+ *       카카오 인가 페이지로 302 Redirect 합니다.
+ *       Swagger UI에서는 Try it out 대신 **브라우저에서 직접 이 URL을 열어** 테스트하세요.
+ *     responses:
+ *       302:
+ *         description: 카카오 인가 페이지로 리다이렉트
+ */
+// 1) 카카오 로그인 시작: 카카오 인가 페이지로 리다이렉트
+router.get("/auth/kakao", async (req, res) => {
+  const clientId = process.env.KAKAO_REST_API_KEY;
+  const redirectUri = process.env.KAKAO_REDIRECT_URI;
+
+  if (!clientId || !redirectUri) {
+    return res.status(500).json({ error: "missing_kakao_env" });
+  }
+
+  // CSRF 방지용 state (소규모라도 추천)
+  const state = crypto.randomBytes(16).toString("hex");
+  await redis.set(`oauth:kakao:state:${state}`, "1", { EX: 300 }); // 5분
+
+  const authorizeUrl =
+    `https://kauth.kakao.com/oauth/authorize` +
+    `?response_type=code` +
+    `&client_id=${encodeURIComponent(clientId)}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&state=${encodeURIComponent(state)}`;
+
+  return res.redirect(authorizeUrl);
+
+});
+
+
+/**
+ * @swagger
+ * /auth/kakao/callback:
+ *   get:
+ *     summary: 카카오 로그인 콜백
+ *     description: |
+ *       카카오가 redirect_uri로 인가 코드를 전달하면, 서버가 토큰 교환 후 사용자 정보를 조회하고 DB에 저장합니다.
+ *       일반적으로 사용자가 직접 호출하지 않고, 카카오 로그인 흐름에서 자동으로 호출됩니다.
+ *     parameters:
+ *       - in: query
+ *         name: code
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: state
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: 로그인 성공(시연용 JSON)
+ *       400:
+ *         description: 잘못된 요청(code/state 누락 등)
+ */
+// 2) 콜백: code -> token -> userinfo -> DB upsert(SELECT/INSERT)
+router.get("/auth/kakao/callback", async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT id, user_id, status, created_at
-       FROM queue_entries
-       ORDER BY id DESC
-       LIMIT 50`
+    const { code, state, error, error_description } = req.query;
+
+    if (error) {
+      return res.status(400).json({ error, error_description });
+    }
+    if (!code) return res.status(400).json({ error: "missing_code" });
+    if (!state) return res.status(400).json({ error: "missing_state" });
+
+    // state 검증
+    const stateKey = `oauth:kakao:state:${state}`;
+    const okState = await redis.get(stateKey);
+    if (!okState) return res.status(400).json({ error: "invalid_state" });
+    await redis.del(stateKey);
+
+    const clientId = process.env.KAKAO_REST_API_KEY;
+    const redirectUri = process.env.KAKAO_REDIRECT_URI;
+    const clientSecret = process.env.KAKAO_CLIENT_SECRET;
+
+    // 1) access token 요청
+    const body = new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      code: String(code),
+    });
+    if (clientSecret) body.set("client_secret", clientSecret);
+
+    const tokenResp = await fetch("https://kauth.kakao.com/oauth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=utf-8" },
+      body,
+    });
+
+    const tokenJson = await tokenResp.json();
+    if (!tokenResp.ok) {
+      return res.status(400).json({ error: "token_request_failed", details: tokenJson });
+    }
+
+    const accessToken = tokenJson.access_token;
+
+    // 2) 사용자 정보 조회
+    const meResp = await fetch("https://kapi.kakao.com/v2/user/me", {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const meJson = await meResp.json();
+    if (!meResp.ok) {
+      return res.status(400).json({ error: "me_request_failed", details: meJson });
+    }
+
+    const kakaoId = String(meJson.id);
+    const nickname =
+      meJson?.kakao_account?.profile?.nickname ??
+      meJson?.properties?.nickname ??
+      null;
+    const email = meJson?.kakao_account?.email ?? null;
+    const gender = meJson?.kakao_account?.gender ?? null;
+
+    // 3) DB upsert
+    const existing = await pool.query(
+      `SELECT id FROM users WHERE kakao_id = $1 LIMIT 1`,
+      [kakaoId]
     );
-    return res.json({ items: result.rows });
+
+    let userRow;
+    if (existing.rowCount === 0) {
+      const ins = await pool.query(
+        `INSERT INTO users (auth_provider, kakao_id, email, nickname, gender)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, auth_provider, kakao_id, email, nickname, gender, created_at`,
+        ["KAKAO", kakaoId, email, nickname, gender]
+      );
+      userRow = ins.rows[0];
+    } else {
+      const upd = await pool.query(
+        `UPDATE users
+         SET email = COALESCE($2, email),
+             nickname = COALESCE($3, nickname),
+             gender = COALESCE($4, gender),
+             updated_at = now()
+         WHERE kakao_id = $1
+         RETURNING id, auth_provider, kakao_id, email, nickname, gender, created_at`,
+        [kakaoId, email, nickname, gender]
+      );
+      userRow = upd.rows[0];
+    }
+
+    // ===============================
+    // ✅ 여기부터 "팝업 종료 + 부모창 알림"
+    // ===============================
+    const frontendOrigin = process.env.FRONTEND_ORIGIN || "http://localhost:4000";
+
+    const payload = {
+      ok: true,
+      user: {
+        id: userRow.id,
+        auth_provider: userRow.auth_provider,
+        kakao_id: userRow.kakao_id,
+        email: userRow.email,
+        nickname: userRow.nickname,
+        gender: userRow.gender,
+      },
+    };
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.send(`
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <title>Login Success</title>
+        </head>
+        <body>
+          <script>
+            (function () {
+              try {
+                var data = ${JSON.stringify(payload)};
+                var targetOrigin = ${JSON.stringify(frontendOrigin)};
+                if (window.opener && !window.opener.closed) {
+                  window.opener.postMessage(data, targetOrigin);
+                }
+              } catch (e) {}
+              window.close();
+            })();
+          </script>
+          <noscript>로그인이 완료되었습니다. 이 창을 닫아주세요.</noscript>
+        </body>
+      </html>
+    `);
   } catch (err) {
-    console.error("GET /queue failed:", err);
+    console.error("GET /auth/kakao/callback failed:", err);
     return res.status(500).json({ error: "internal_error" });
   }
 });
+
+
+/* 
+  ************************
+  ************************
+  자체 회원가입 
+  ************************
+  ************************
+*/
+
+// 회원가입 api
+router.post("/auth/signup", async (req, res) => {
+  try {
+    const { email, password, nickname, gender } = req.body || {};
+    if (!email) return res.status(400).json({ error: "email is required" });
+    if (!password) return res.status(400).json({ error: "password is required" });
+
+    // 정책: 자체가입은 LOCAL
+    // (카카오 가입자와의 교차 중복 정책은 백엔드에서 추후 반영 가능)
+
+    // 비밀번호 해시
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    // 삽입 (중복은 UNIQUE 인덱스가 막아줌)
+    const r = await pool.query(
+      `INSERT INTO users (auth_provider, email, password, nickname, gender)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, auth_provider, email, nickname, gender, created_at`,
+      ["LOCAL", email, passwordHash, nickname ?? null, gender ?? null]
+    );
+
+    return res.status(201).json({ ok: true, user: r.rows[0] });
+  } catch (err) {
+    // email UNIQUE 충돌 처리
+    if (err?.code === "23505") {
+      return res.status(409).json({ error: "email_already_exists" });
+    }
+    console.error("POST /auth/signup failed:", err);
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// 로그인 api
+router.post("/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email) return res.status(400).json({ error: "email is required" });
+    if (!password) return res.status(400).json({ error: "password is required" });
+
+    const r = await pool.query(
+      `SELECT id, auth_provider, email, password, nickname, gender
+       FROM users
+       WHERE email = $1
+       LIMIT 1`,
+      [email]
+    );
+
+    if (r.rowCount === 0) {
+      return res.status(401).json({ error: "invalid_credentials" });
+    }
+
+    const user = r.rows[0];
+
+    // 카카오 가입자는 자체 로그인 불가(정책을 여기서 강제)
+    if (user.auth_provider !== "LOCAL") {
+      return res.status(403).json({ error: "not_local_account" });
+    }
+
+    const ok = await bcrypt.compare(password, user.password);
+    if (!ok) return res.status(401).json({ error: "invalid_credentials" });
+
+    // 다음 단계에서 JWT 발급할 예정. 지금은 성공 응답만.
+    return res.json({
+      ok: true,
+      user: {
+        id: user.id,
+        auth_provider: user.auth_provider,
+        email: user.email,
+        nickname: user.nickname,
+        gender: user.gender,
+      },
+    });
+  } catch (err) {
+    console.error("POST /auth/login failed:", err);
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
+
+/*
+  ************************
+  ************************
+  카카오 로그아웃
+  ************************
+  ************************
+*/
+
+// 카카오 로그아웃 시작: 카카오 로그아웃 페이지로 리다이렉트
+router.get("/auth/kakao/logout", (req, res) => {
+  const clientId = process.env.KAKAO_REST_API_KEY;
+  const logoutRedirectUri = process.env.KAKAO_LOGOUT_REDIRECT_URI;
+
+  if (!clientId) return res.status(500).send("missing KAKAO_REST_API_KEY");
+  if (!logoutRedirectUri) return res.status(500).send("missing KAKAO_LOGOUT_REDIRECT_URI");
+
+  const url =
+    "https://kauth.kakao.com/oauth/logout" +
+    `?client_id=${encodeURIComponent(clientId)}` +
+    `&logout_redirect_uri=${encodeURIComponent(logoutRedirectUri)}`;
+
+  return res.redirect(url);
+});
+
+// 카카오 로그아웃 완료 후 돌아오는 콜백: 프론트 홈으로 보내기
+router.get("/auth/kakao/logout/callback", (req, res) => {
+  const frontendBase = process.env.FRONTEND_ORIGIN || "http://localhost:4000";
+  return res.redirect(`${frontendBase}/`);
+});
+
 
 export default router;

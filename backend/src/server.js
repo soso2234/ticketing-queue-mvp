@@ -8,6 +8,7 @@ import { initRedis, redis } from "./redisClient.js";
 
 import swaggerUi from "swagger-ui-express";
 import { swaggerSpec } from "./swagger.js";
+import { pool } from "./db.js";
 
 const BATCH_SIZE = Number(process.env.QUEUE_BATCH_SIZE || 5);
 const INTERVAL_MS = Number(process.env.QUEUE_BATCH_INTERVAL_MS || 3000);
@@ -86,6 +87,15 @@ async function admitBatchOnce() {
 
 // Redis 먼저 연결
 await initRedis();
+
+// DB 연결 테스트
+try {
+  const r = await pool.query("SELECT now() as now");
+  console.log("[PG] connected:", r.rows[0].now);
+} catch (e) {
+  console.error("[PG] connection failed:", e);
+  process.exit(1);
+}
 
 // 그 다음에 입장 처리기 시작
 setInterval(admitBatchOnce, INTERVAL_MS);
