@@ -12,7 +12,9 @@ export const swaggerSpec = swaggerJSDoc({
       title: "Ticketing Queue API",
       version: "1.0.0",
     },
-    servers: [{ url: "http://localhost:3000" }],
+    servers: [{ 
+      url: process.env.API_BASE_URL || "http://localhost:3000" 
+    }],
   },
   apis: [
     path.join(__dirname, "server.js"),

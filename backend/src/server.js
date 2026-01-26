@@ -104,5 +104,5 @@ admitBatchOnce();
 // 마지막에 서버 listen
 app.listen(port, () => {
   console.log(`Backend listening on ${port}`);
-  console.log(`Swagger docs: http://localhost:${port}/api-docs`);
+  console.log(`Swagger docs: ${process.env.API_BASE_URL || `http://localhost:${port}/api-docs`}`);
 });
