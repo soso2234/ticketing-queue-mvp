@@ -98,8 +98,8 @@ try {
 }
 
 // 그 다음에 입장 처리기 시작(수정)
-//setInterval(admitBatchOnce, INTERVAL_MS);
-//admitBatchOnce();
+setInterval(admitBatchOnce, INTERVAL_MS);
+admitBatchOnce();
 
 // 마지막에 서버 listen
 app.listen(port, () => {
