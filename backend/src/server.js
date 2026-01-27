@@ -17,7 +17,13 @@ const ADMISSION_TTL_SEC = Number(process.env.ADMISSION_TTL_SEC || 120);
 const app = express();
 const port = Number(process.env.PORT || 3000);
 
-app.use(cors());
+//frontend 
+const allowOrigin = process.env.FRONTEND_ORIGIN || "*";
+app.use(cors({
+  origin: allowOrigin,
+  credentials: false,
+}));
+
 app.use(express.json());
 
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
